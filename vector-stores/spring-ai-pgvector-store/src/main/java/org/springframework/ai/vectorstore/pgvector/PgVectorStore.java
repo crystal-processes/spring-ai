@@ -16,14 +16,11 @@
 
 package org.springframework.ai.vectorstore.pgvector;
 
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 
 import com.pgvector.PGvector;
 import org.apache.commons.logging.Log;
@@ -34,25 +31,21 @@ import tools.jackson.databind.json.JsonMapper;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.document.DocumentMetadata;
 import org.springframework.ai.embedding.EmbeddingModel;
-import org.springframework.ai.embedding.EmbeddingOptions;
 import org.springframework.ai.observation.conventions.VectorStoreProvider;
 import org.springframework.ai.observation.conventions.VectorStoreSimilarityMetric;
 import org.springframework.ai.util.JacksonUtils;
 import org.springframework.ai.vectorstore.AbstractVectorStoreBuilder;
 import org.springframework.ai.vectorstore.SearchRequest;
-import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
-import org.springframework.ai.vectorstore.filter.FilterExpressionConverter;
 import org.springframework.ai.vectorstore.observation.AbstractObservationVectorStore;
 import org.springframework.ai.vectorstore.observation.VectorStoreObservationContext;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.jdbc.core.RowMapper;
-import org.springframework.jdbc.core.SqlTypeValue;
-import org.springframework.jdbc.core.StatementCreatorUtils;
+import org.springframework.jdbc.core.RowMapperResultSetExtractor;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.util.Assert;
-import org.springframework.util.StringUtils;
 
 /**
  * PostgreSQL-based vector store implementation using the pgvector extension.
@@ -177,13 +170,6 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	private static final Log logger = LogFactory.getLog(PgVectorStore.class);
 
-	/**
-	 * Default implementation of {@link PgDistanceType}.
-	 */
-	private record DefaultPgDistanceType(String name, String operator, String index,
-			String similaritySearchSqlTemplate) implements org.springframework.ai.vectorstore.pgvector.PgDistanceType {
-	}
-
 	/*
 	 * @since 2.0.2
 	 */
@@ -199,9 +185,8 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 			"SELECT *, (1 + (embedding <#> ?)) AS distance FROM %s WHERE (1 + (embedding <#> ?)) < ? %s ORDER BY distance LIMIT ? ");
 
 	/**
-	 * Defaults to CosineDistance. But if vectors are normalized to length 1 (like
-	 * OpenAI * embeddings), use inner product (NegativeInnerProduct) for best
-	 * performance.
+	 * Defaults to CosineDistance. But if vectors are normalized to length 1 (like OpenAI
+	 * * embeddings), use inner product (NegativeInnerProduct) for best performance.
 	 *
 	 * @since 2.0.2
 	 */
@@ -212,8 +197,6 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 	private static final Map<org.springframework.ai.vectorstore.pgvector.PgDistanceType, VectorStoreSimilarityMetric> SIMILARITY_TYPE_MAPPING = Map
 		.of(COSINE_DISTANCE, VectorStoreSimilarityMetric.COSINE, EUCLIDEAN_DISTANCE,
 				VectorStoreSimilarityMetric.EUCLIDEAN, NEGATIVE_INNER_PRODUCT, VectorStoreSimilarityMetric.DOT);
-
-	public final FilterExpressionConverter filterExpressionConverter = new PgVectorFilterExpressionConverter();
 
 	private final String vectorTableName;
 
@@ -235,7 +218,9 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	private final JsonMapper jsonMapper;
 
-	private final DocumentRowMapper documentRowMapper;
+	private final ResultSetExtractor<List<Document>> documentExtractor;
+
+	private final SqlVectorStoreStatementCreator sqlVectorStoreStatementCreator;
 
 	private final boolean removeExistingVectorStoreTable;
 
@@ -243,10 +228,8 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	private final PgVectorSchemaValidator schemaValidator;
 
-	private final int maxDocumentBatchSize;
-
 	/**
-	 * @param builder {@link VectorStore.Builder} for pg vector store
+	 * @param builder {@link Builder} for pg vector store
 	 */
 	protected PgVectorStore(PgVectorStoreBuilder builder) {
 		super(builder);
@@ -254,8 +237,9 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 		Assert.notNull(builder.jdbcTemplate, "JdbcTemplate must not be null");
 
 		this.jsonMapper = JsonMapper.builder().addModules(JacksonUtils.instantiateAvailableModules()).build();
-		this.documentRowMapper = new DocumentRowMapper(this.jsonMapper);
+		this.documentExtractor = new RowMapperResultSetExtractor<>(new DocumentRowMapper(this.jsonMapper));
 
+		this.sqlVectorStoreStatementCreator = builder.getSqlVectorStoreStatementCreator();
 		String vectorTable = builder.vectorTableName;
 		this.vectorTableName = vectorTable.isEmpty() ? DEFAULT_TABLE_NAME : vectorTable.trim();
 		if (logger.isInfoEnabled()) {
@@ -277,7 +261,6 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 		this.createIndexMethod = builder.indexType;
 		this.initializeSchema = builder.initializeSchema;
 		this.schemaValidator = new PgVectorSchemaValidator(this.jdbcTemplate);
-		this.maxDocumentBatchSize = builder.maxDocumentBatchSize;
 	}
 
 	public org.springframework.ai.vectorstore.pgvector.PgDistanceType getDistanceType() {
@@ -290,95 +273,24 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	@Override
 	public void doAdd(List<Document> documents) {
-		List<float[]> embeddings = this.embeddingModel.embed(documents, EmbeddingOptions.builder().build(),
-				this.batchingStrategy);
-
-		List<List<Document>> batchedDocuments = batchDocuments(documents);
-		batchedDocuments.forEach(batchDocument -> insertOrUpdateBatch(batchDocument, documents, embeddings));
-	}
-
-	private List<List<Document>> batchDocuments(List<Document> documents) {
-		List<List<Document>> batches = new ArrayList<>();
-		for (int i = 0; i < documents.size(); i += this.maxDocumentBatchSize) {
-			batches.add(documents.subList(i, Math.min(i + this.maxDocumentBatchSize, documents.size())));
-		}
-		return batches;
-	}
-
-	private void insertOrUpdateBatch(List<Document> batch, List<Document> documents, List<float[]> embeddings) {
-		String sql = "INSERT INTO " + getFullyQualifiedTableName()
-				+ " (id, content, metadata, embedding) VALUES (?, ?, ?::jsonb, ?) " + "ON CONFLICT (id) DO "
-				+ "UPDATE SET content = ? , metadata = ?::jsonb , embedding = ? ";
-
-		this.jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
-
-			@Override
-			public void setValues(PreparedStatement ps, int i) throws SQLException {
-
-				var document = batch.get(i);
-				var id = convertIdToPgType(document.getId());
-				var content = document.getText();
-				var json = toJson(document.getMetadata());
-				var embedding = embeddings.get(documents.indexOf(document));
-				var pGvector = new PGvector(embedding);
-
-				StatementCreatorUtils.setParameterValue(ps, 1, SqlTypeValue.TYPE_UNKNOWN, id);
-				StatementCreatorUtils.setParameterValue(ps, 2, SqlTypeValue.TYPE_UNKNOWN, content);
-				StatementCreatorUtils.setParameterValue(ps, 3, SqlTypeValue.TYPE_UNKNOWN, json);
-				StatementCreatorUtils.setParameterValue(ps, 4, SqlTypeValue.TYPE_UNKNOWN, pGvector);
-				StatementCreatorUtils.setParameterValue(ps, 5, SqlTypeValue.TYPE_UNKNOWN, content);
-				StatementCreatorUtils.setParameterValue(ps, 6, SqlTypeValue.TYPE_UNKNOWN, json);
-				StatementCreatorUtils.setParameterValue(ps, 7, SqlTypeValue.TYPE_UNKNOWN, pGvector);
-			}
-
-			@Override
-			public int getBatchSize() {
-				return batch.size();
-			}
-		});
-	}
-
-	private String toJson(Map<String, Object> map) {
-		return this.jsonMapper.writeValueAsString(map);
-	}
-
-	private Object convertIdToPgType(String id) {
-		return switch (getIdType()) {
-			case UUID -> UUID.fromString(id);
-			case TEXT -> id;
-			case INTEGER, SERIAL -> Integer.valueOf(id);
-			case BIGSERIAL -> Long.valueOf(id);
-		};
+		GeneratedKeyHolder generatedKeyHolder = new GeneratedKeyHolder();
+		this.jdbcTemplate.batchUpdate(this.sqlVectorStoreStatementCreator.insertUpdateStatement(),
+				this.sqlVectorStoreStatementCreator.insertUpdateSetter(documents, generatedKeyHolder),
+				generatedKeyHolder);
 	}
 
 	@Override
 	public void doDelete(List<String> idList) {
-		String sql = "DELETE FROM " + getFullyQualifiedTableName() + " WHERE id = ?";
-
-		this.jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
-
-			@Override
-			public void setValues(PreparedStatement ps, int i) throws SQLException {
-				var id = idList.get(i);
-				StatementCreatorUtils.setParameterValue(ps, 1, SqlTypeValue.TYPE_UNKNOWN, convertIdToPgType(id));
-			}
-
-			@Override
-			public int getBatchSize() {
-				return idList.size();
-			}
-		});
+		GeneratedKeyHolder generatedKeyHolder = new GeneratedKeyHolder();
+		this.jdbcTemplate.batchUpdate(this.sqlVectorStoreStatementCreator.deleteByIdStatement(),
+				this.sqlVectorStoreStatementCreator.deleteByIdSetter(idList, generatedKeyHolder), generatedKeyHolder);
 	}
 
 	@Override
 	protected void doDelete(Filter.Expression filterExpression) {
-		String filterClause = this.filterExpressionConverter.convertExpression(filterExpression);
-
-		String sql = "DELETE FROM " + getFullyQualifiedTableName() + " WHERE " + filterClause;
-
 		// Execute the delete
 		try {
-			this.jdbcTemplate.update(sql);
+			this.jdbcTemplate.update(this.sqlVectorStoreStatementCreator.deleteStatement(filterExpression));
 		}
 		catch (Exception e) {
 			throw new IllegalStateException("Failed to delete documents by filter", e);
@@ -387,24 +299,8 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	@Override
 	public List<Document> doSimilaritySearch(SearchRequest request) {
-
-		String nativeFilterExpression = (request.getFilterExpression() != null)
-				? this.filterExpressionConverter.convertExpression(request.getFilterExpression()) : "";
-
-		String jsonPathFilter = "";
-
-		if (StringUtils.hasText(nativeFilterExpression)) {
-			jsonPathFilter = " AND " + nativeFilterExpression + " ";
-		}
-
-		double distance = 1 - request.getSimilarityThreshold();
-
-		PGvector queryEmbedding = getQueryEmbedding(request.getQuery());
-
-		return this.jdbcTemplate.query(
-				String.format(this.getDistanceType().similaritySearchSqlTemplate(), getFullyQualifiedTableName(),
-						jsonPathFilter),
-				this.documentRowMapper, queryEmbedding, queryEmbedding, distance, request.getTopK());
+		return this.jdbcTemplate.query(this.sqlVectorStoreStatementCreator.similaritySearchStatement(request),
+				this.documentExtractor);
 	}
 
 	public List<Double> embeddingDistance(String query) {
@@ -607,12 +503,12 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 	}
 
 	/**
-     * Defaults to CosineDistance. But if vectors are normalized to length 1 (like OpenAI
-     * embeddings), use inner product (NegativeInnerProduct) for best performance.
-     *
-     * @deprecated in favor of
-     * {@link org.springframework.ai.vectorstore.pgvector.PgDistanceType}.
-     */
+	 * Defaults to CosineDistance. But if vectors are normalized to length 1 (like OpenAI
+	 * embeddings), use inner product (NegativeInnerProduct) for best performance.
+	 *
+	 * @deprecated in favor of
+	 * {@link org.springframework.ai.vectorstore.pgvector.PgDistanceType}.
+	 */
 	@Deprecated(since = "2.0.2")
 	public enum PgDistanceType {
 
@@ -791,6 +687,19 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 			return new PgVectorStore(this);
 		}
 
+		public SqlVectorStoreStatementCreator getSqlVectorStoreStatementCreator() {
+			return new PgVectorStoreStatementCreator(this.distanceType, this.vectorTableName, this.schemaName,
+					this.embeddingModel, this.idType, this.batchingStrategy, this.maxDocumentBatchSize,
+					JsonMapper.builder().addModules(JacksonUtils.instantiateAvailableModules()).build());
+		}
+
+	}
+
+	/**
+	 * Default implementation of {@link PgDistanceType}.
+	 */
+	private record DefaultPgDistanceType(String name, String operator, String index,
+			String similaritySearchSqlTemplate) implements org.springframework.ai.vectorstore.pgvector.PgDistanceType {
 	}
 
 }
