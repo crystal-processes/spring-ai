@@ -23,7 +23,6 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.filter.Filter;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.PreparedStatementCreator;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 
 public interface SqlVectorStoreStatementCreator {
@@ -34,7 +33,7 @@ public interface SqlVectorStoreStatementCreator {
 
 	PreparedStatementCreator deleteByIdStatement();
 
-	BatchPreparedStatementSetter deleteByIdSetter(List<String> idList, GeneratedKeyHolder generatedKeyHolder);
+	BatchPreparedStatementSetter deleteByIdSetter(List<String> idList, KeyHolder generatedKeyHolder);
 
 	PreparedStatementCreator insertUpdateStatement();
 

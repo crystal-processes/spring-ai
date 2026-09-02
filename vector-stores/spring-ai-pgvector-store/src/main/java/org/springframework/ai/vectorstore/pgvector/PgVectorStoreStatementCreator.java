@@ -37,7 +37,6 @@ import org.springframework.jdbc.core.PreparedStatementCreator;
 import org.springframework.jdbc.core.PreparedStatementCreatorFactory;
 import org.springframework.jdbc.core.SqlTypeValue;
 import org.springframework.jdbc.core.StatementCreatorUtils;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.util.StringUtils;
 
@@ -115,7 +114,7 @@ public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCre
 	}
 
 	@Override
-	public BatchPreparedStatementSetter deleteByIdSetter(List<String> idList, GeneratedKeyHolder generatedKeyHolder) {
+	public BatchPreparedStatementSetter deleteByIdSetter(List<String> idList, KeyHolder keyHolder) {
 		return new BatchPreparedStatementSetter() {
 
 			@Override
