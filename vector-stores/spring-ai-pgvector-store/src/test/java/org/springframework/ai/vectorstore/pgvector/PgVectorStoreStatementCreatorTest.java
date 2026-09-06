@@ -31,6 +31,7 @@ import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.embedding.TokenCountBatchingStrategy;
 import org.springframework.ai.util.JacksonUtils;
 import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.filter.Filter;
 import org.springframework.ai.vectorstore.filter.FilterExpressionTextParser;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementCreator;
@@ -48,8 +49,9 @@ class PgVectorStoreStatementCreatorTest {
 
 	EmbeddingModel embeddingModel = Mockito.mock(EmbeddingModel.class);
 
-	PgVectorStoreStatementCreator creator = new PgVectorStoreStatementCreator(PgVectorStore.COSINE_DISTANCE, "vector",
-			"public", this.embeddingModel, PgVectorStore.PgIdType.TEXT, new TokenCountBatchingStrategy(), 20,
+	PgVectorStoreStatementCreator creator = new PgVectorStoreStatementCreator(
+			PgVectorStore.PgDistanceType.COSINE_DISTANCE, "vector", "public", this.embeddingModel,
+			PgVectorStore.PgIdType.TEXT, new TokenCountBatchingStrategy(), 20,
 			JsonMapper.builder().addModules(JacksonUtils.instantiateAvailableModules()).build());
 
 	@Test
@@ -76,6 +78,60 @@ class PgVectorStoreStatementCreatorTest {
 
 		verify(connection, times(1)).prepareStatement(contains("metadata::jsonb @@ '"));
 		verify(connection, times(1)).prepareStatement(contains("O''Brien"));
+	}
+
+	@Test
+	void deleteByFilterDoublesSingleQuotesWhenMetadataKeyContainsApostrophe() throws SQLException {
+		var jdbcTemplate = mock(JdbcTemplate.class);
+		when(jdbcTemplate.update(anyString())).thenReturn(1);
+
+		var expression = new Filter.Expression(Filter.ExpressionType.EQ, new Filter.Key("O'Brien"),
+				new Filter.Value("n"));
+
+		PreparedStatementCreator preparedStatementCreator = this.creator.deleteStatement(expression);
+
+		Connection connection = mock(Connection.class);
+		when(connection.prepareStatement(anyString())).thenReturn(mock(PreparedStatement.class));
+
+		preparedStatementCreator.createPreparedStatement(connection);
+
+		verify(connection, times(1)).prepareStatement(contains("$.\"" + "O''Brien\" == \"n\""));
+		verify(connection, times(1)).prepareStatement(contains("O''Brien"));
+	}
+
+	@Test
+	void deleteByFilterDoublesSingleQuotesWhenStringValueContainsApostrophe() throws SQLException {
+		var jdbcTemplate = mock(JdbcTemplate.class);
+		when(jdbcTemplate.update(anyString())).thenReturn(1);
+
+		var expression = new Filter.Expression(Filter.ExpressionType.EQ, new Filter.Key("author"),
+				new Filter.Value("O'Connor"));
+
+		PreparedStatementCreator preparedStatementCreator = this.creator.deleteStatement(expression);
+
+		Connection connection = mock(Connection.class);
+		when(connection.prepareStatement(anyString())).thenReturn(mock(PreparedStatement.class));
+
+		preparedStatementCreator.createPreparedStatement(connection);
+
+		verify(connection, times(1)).prepareStatement(contains("O''Connor"));
+	}
+
+	@Test
+	void deleteByFilterFromTextParserDoublesSingleQuotesForQuotedKeyWithApostrophe() throws SQLException {
+		var jdbcTemplate = mock(JdbcTemplate.class);
+		when(jdbcTemplate.update(anyString())).thenReturn(1);
+
+		var expression = new FilterExpressionTextParser().parse("\"vendor\" == \"ACME's\"");
+
+		PreparedStatementCreator preparedStatementCreator = this.creator.deleteStatement(expression);
+
+		Connection connection = mock(Connection.class);
+		when(connection.prepareStatement(anyString())).thenReturn(mock(PreparedStatement.class));
+
+		preparedStatementCreator.createPreparedStatement(connection);
+
+		verify(connection, times(1)).prepareStatement(contains("ACME''s"));
 	}
 
 }

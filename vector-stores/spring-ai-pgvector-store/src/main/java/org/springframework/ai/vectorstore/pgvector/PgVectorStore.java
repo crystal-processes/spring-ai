@@ -74,7 +74,7 @@ import org.springframework.util.Assert;
  * <pre>{@code
  * PgVectorStore vectorStore = PgVectorStore.builder(jdbcTemplate, embeddingModel)
  *     .dimensions(1536) // Optional: defaults to model dimensions or 1536
- *     .distanceType(PgVectorStore.COSINE_DISTANCE)
+ *     .distanceType(PgDistanceType.COSINE_DISTANCE)
  *     .indexType(PgIndexType.HNSW)
  *     .build();
  *
@@ -100,7 +100,7 @@ import org.springframework.util.Assert;
  * PgVectorStore vectorStore = PgVectorStore.builder(jdbcTemplate, embeddingModel)
  *     .schemaName("custom_schema")
  *     .vectorTableName("custom_vectors")
- *     .distanceType(PgVectorStore.NEGATIVE_INNER_PRODUCT)
+ *     .distanceType(PgDistanceType.NEGATIVE_INNER_PRODUCT)
  *     .removeExistingVectorStoreTable(true)
  *     .initializeSchema(true)
  *     .maxDocumentBatchSize(1000)
@@ -170,33 +170,10 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	private static final Log logger = LogFactory.getLog(PgVectorStore.class);
 
-	/*
-	 * @since 2.0.2
-	 */
-	public static final org.springframework.ai.vectorstore.pgvector.PgDistanceType EUCLIDEAN_DISTANCE = new DefaultPgDistanceType(
-			"EUCLIDEAN_DISTANCE", "<->", "vector_l2_ops",
-			"SELECT *, embedding <-> ? AS distance FROM %s WHERE embedding <-> ? < ? %s ORDER BY distance LIMIT ? ");
-
-	/*
-	 * @since 2.0.2
-	 */
-	public static final org.springframework.ai.vectorstore.pgvector.PgDistanceType NEGATIVE_INNER_PRODUCT = new DefaultPgDistanceType(
-			"NEGATIVE_INNER_PRODUCT", "<#>", "vector_ip_ops",
-			"SELECT *, (1 + (embedding <#> ?)) AS distance FROM %s WHERE (1 + (embedding <#> ?)) < ? %s ORDER BY distance LIMIT ? ");
-
-	/**
-	 * Defaults to CosineDistance. But if vectors are normalized to length 1 (like OpenAI
-	 * * embeddings), use inner product (NegativeInnerProduct) for best performance.
-	 *
-	 * @since 2.0.2
-	 */
-	public static final org.springframework.ai.vectorstore.pgvector.PgDistanceType COSINE_DISTANCE = new DefaultPgDistanceType(
-			"COSINE_DISTANCE", "<=>", "vector_cosine_ops",
-			"SELECT *, embedding <=> ? AS distance FROM %s WHERE embedding <=> ? < ? %s ORDER BY distance LIMIT ? ");
-
-	private static final Map<org.springframework.ai.vectorstore.pgvector.PgDistanceType, VectorStoreSimilarityMetric> SIMILARITY_TYPE_MAPPING = Map
-		.of(COSINE_DISTANCE, VectorStoreSimilarityMetric.COSINE, EUCLIDEAN_DISTANCE,
-				VectorStoreSimilarityMetric.EUCLIDEAN, NEGATIVE_INNER_PRODUCT, VectorStoreSimilarityMetric.DOT);
+	private static final Map<PgDistanceType, VectorStoreSimilarityMetric> SIMILARITY_TYPE_MAPPING = Map.of(
+			PgDistanceType.COSINE_DISTANCE, VectorStoreSimilarityMetric.COSINE, PgDistanceType.EUCLIDEAN_DISTANCE,
+			VectorStoreSimilarityMetric.EUCLIDEAN, PgDistanceType.NEGATIVE_INNER_PRODUCT,
+			VectorStoreSimilarityMetric.DOT);
 
 	private final String vectorTableName;
 
@@ -214,9 +191,7 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	private final int dimensions;
 
-	private final org.springframework.ai.vectorstore.pgvector.PgDistanceType distanceType;
-
-	private final JsonMapper jsonMapper;
+	private final PgDistanceType distanceType;
 
 	private final ResultSetExtractor<List<Document>> documentExtractor;
 
@@ -236,8 +211,8 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 		Assert.notNull(builder.jdbcTemplate, "JdbcTemplate must not be null");
 
-		this.jsonMapper = JsonMapper.builder().addModules(JacksonUtils.instantiateAvailableModules()).build();
-		this.documentExtractor = new RowMapperResultSetExtractor<>(new DocumentRowMapper(this.jsonMapper));
+		JsonMapper jsonMapper = JsonMapper.builder().addModules(JacksonUtils.instantiateAvailableModules()).build();
+		this.documentExtractor = new RowMapperResultSetExtractor<>(new DocumentRowMapper(jsonMapper));
 
 		this.sqlVectorStoreStatementCreator = builder.getSqlVectorStoreStatementCreator();
 		String vectorTable = builder.vectorTableName;
@@ -263,7 +238,7 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 		this.schemaValidator = new PgVectorSchemaValidator(this.jdbcTemplate);
 	}
 
-	public org.springframework.ai.vectorstore.pgvector.PgDistanceType getDistanceType() {
+	public PgDistanceType getDistanceType() {
 		return this.distanceType;
 	}
 
@@ -273,17 +248,19 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 	@Override
 	public void doAdd(List<Document> documents) {
-		GeneratedKeyHolder generatedKeyHolder = new GeneratedKeyHolder();
-		this.jdbcTemplate.batchUpdate(this.sqlVectorStoreStatementCreator.insertUpdateStatement(),
-				this.sqlVectorStoreStatementCreator.insertUpdateSetter(documents, generatedKeyHolder),
-				generatedKeyHolder);
+		this.sqlVectorStoreStatementCreator.insertUpdateStatement(documents).forEach(this::insertOrUpdateBatch);
+	}
+
+	private void insertOrUpdateBatch(SqlVectorStorePreparedStatement statement) {
+		this.jdbcTemplate.batchUpdate(statement.getCreator(), statement.getSetter(), new GeneratedKeyHolder());
 	}
 
 	@Override
 	public void doDelete(List<String> idList) {
 		GeneratedKeyHolder generatedKeyHolder = new GeneratedKeyHolder();
-		this.jdbcTemplate.batchUpdate(this.sqlVectorStoreStatementCreator.deleteByIdStatement(),
-				this.sqlVectorStoreStatementCreator.deleteByIdSetter(idList, generatedKeyHolder), generatedKeyHolder);
+		this.sqlVectorStoreStatementCreator.deleteByIdStatement(idList, generatedKeyHolder)
+			.forEach(statement -> this.jdbcTemplate.batchUpdate(statement.getCreator(), statement.getSetter(),
+					generatedKeyHolder));
 	}
 
 	@Override
@@ -322,7 +299,7 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 	}
 
 	private String comparisonOperator() {
-		return this.getDistanceType().operator();
+		return this.getDistanceType().operator;
 	}
 
 	// ---------------------------------------------------------------------------------
@@ -381,7 +358,7 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 			this.jdbcTemplate.execute(String.format("""
 					CREATE INDEX IF NOT EXISTS %s ON %s USING %s (embedding %s)
 					""", this.getVectorIndexName(), this.getFullyQualifiedTableName(), this.createIndexMethod,
-					this.getDistanceType().index()));
+					this.getDistanceType().index));
 		}
 
 		validateTableSchemaIfEnabled();
@@ -505,11 +482,7 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 	/**
 	 * Defaults to CosineDistance. But if vectors are normalized to length 1 (like OpenAI
 	 * embeddings), use inner product (NegativeInnerProduct) for best performance.
-	 *
-	 * @deprecated in favor of
-	 * {@link org.springframework.ai.vectorstore.pgvector.PgDistanceType}.
 	 */
-	@Deprecated(since = "2.0.2")
 	public enum PgDistanceType {
 
 		// NOTE: works only if vectors are normalized to length 1 (like OpenAI
@@ -600,7 +573,7 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 
 		private int dimensions = PgVectorStore.INVALID_EMBEDDING_DIMENSION;
 
-		private org.springframework.ai.vectorstore.pgvector.PgDistanceType distanceType = COSINE_DISTANCE;
+		private PgDistanceType distanceType = PgDistanceType.COSINE_DISTANCE;
 
 		private boolean removeExistingVectorStoreTable = false;
 
@@ -641,24 +614,7 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 			return this;
 		}
 
-		/**
-		 * @deprecated in favor of
-		 * {@link #distanceType(org.springframework.ai.vectorstore.pgvector.PgDistanceType)}
-		 * @param distanceType distanceType to set.
-		 * @return builder.
-		 */
-		@Deprecated(since = "2.0.2")
 		public PgVectorStoreBuilder distanceType(PgDistanceType distanceType) {
-			this.distanceType = switch (distanceType) {
-				case EUCLIDEAN_DISTANCE -> PgVectorStore.EUCLIDEAN_DISTANCE;
-				case NEGATIVE_INNER_PRODUCT -> PgVectorStore.NEGATIVE_INNER_PRODUCT;
-				case COSINE_DISTANCE -> PgVectorStore.COSINE_DISTANCE;
-			};
-			return this;
-		}
-
-		public PgVectorStoreBuilder distanceType(
-				org.springframework.ai.vectorstore.pgvector.PgDistanceType distanceType) {
 			this.distanceType = distanceType;
 			return this;
 		}
@@ -693,13 +649,6 @@ public class PgVectorStore extends AbstractObservationVectorStore implements Ini
 					JsonMapper.builder().addModules(JacksonUtils.instantiateAvailableModules()).build());
 		}
 
-	}
-
-	/**
-	 * Default implementation of {@link PgDistanceType}.
-	 */
-	private record DefaultPgDistanceType(String name, String operator, String index,
-			String similaritySearchSqlTemplate) implements org.springframework.ai.vectorstore.pgvector.PgDistanceType {
 	}
 
 }

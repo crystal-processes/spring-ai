@@ -17,26 +17,28 @@
 package org.springframework.ai.vectorstore.pgvector;
 
 import java.util.List;
+import java.util.stream.Stream;
 
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.filter.Filter;
-import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.PreparedStatementCreator;
 import org.springframework.jdbc.support.KeyHolder;
 
+/**
+ * A statement creator for generating SQL statements for the SQL based vector stores.
+ *
+ * @author Martin Grofcik
+ * @since 2.0.2
+ */
 public interface SqlVectorStoreStatementCreator {
 
 	PreparedStatementCreator similaritySearchStatement(SearchRequest searchRequest);
 
 	PreparedStatementCreator deleteStatement(Filter.Expression filterExpression);
 
-	PreparedStatementCreator deleteByIdStatement();
+	Stream<SqlVectorStorePreparedStatement> deleteByIdStatement(List<String> idList, KeyHolder keyHolder);
 
-	BatchPreparedStatementSetter deleteByIdSetter(List<String> idList, KeyHolder generatedKeyHolder);
-
-	PreparedStatementCreator insertUpdateStatement();
-
-	BatchPreparedStatementSetter insertUpdateSetter(List<Document> documents, KeyHolder keyHolder);
+	Stream<SqlVectorStorePreparedStatement> insertUpdateStatement(List<Document> documents);
 
 }

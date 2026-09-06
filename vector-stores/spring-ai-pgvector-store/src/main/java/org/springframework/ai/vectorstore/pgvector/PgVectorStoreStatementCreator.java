@@ -18,9 +18,11 @@ package org.springframework.ai.vectorstore.pgvector;
 
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import com.pgvector.PGvector;
 import tools.jackson.databind.ObjectMapper;
@@ -33,6 +35,7 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.filter.Filter;
 import org.springframework.ai.vectorstore.filter.FilterExpressionConverter;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
+import org.springframework.jdbc.core.InterruptibleBatchPreparedStatementSetter;
 import org.springframework.jdbc.core.PreparedStatementCreator;
 import org.springframework.jdbc.core.PreparedStatementCreatorFactory;
 import org.springframework.jdbc.core.SqlTypeValue;
@@ -40,11 +43,17 @@ import org.springframework.jdbc.core.StatementCreatorUtils;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.util.StringUtils;
 
+/**
+ * A statement creator for generating SQL statements for the PostgreSQL vector store.
+ *
+ * @author Martin Grofcik
+ *
+ */
 public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCreator {
 
 	private final PreparedStatementCreatorFactory statementFactory;
 
-	private final PgDistanceType distanceType;
+	private final PgVectorStore.PgDistanceType distanceType;
 
 	private final String vectorTableName;
 
@@ -62,9 +71,9 @@ public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCre
 
 	private final ObjectMapper jsonMapper;
 
-	public PgVectorStoreStatementCreator(PgDistanceType distanceType, String vectorTableName, String schemaName,
-			EmbeddingModel embeddingModel, PgVectorStore.PgIdType idType, BatchingStrategy batchingStrategy,
-			int maxDocumentBatchSize, ObjectMapper jsonMapper) {
+	public PgVectorStoreStatementCreator(PgVectorStore.PgDistanceType distanceType, String vectorTableName,
+			String schemaName, EmbeddingModel embeddingModel, PgVectorStore.PgIdType idType,
+			BatchingStrategy batchingStrategy, int maxDocumentBatchSize, ObjectMapper jsonMapper) {
 		this.distanceType = distanceType;
 		this.vectorTableName = vectorTableName;
 		this.schemaName = schemaName;
@@ -94,7 +103,7 @@ public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCre
 
 		return this.statementFactory
 			.newPreparedStatementCreator(
-					String.format(this.distanceType.similaritySearchSqlTemplate(), getFullyQualifiedTableName(),
+					String.format(this.distanceType.similaritySearchSqlTemplate, getFullyQualifiedTableName(),
 							jsonPathFilter),
 					new Object[] { queryEmbedding, queryEmbedding, distance, request.getTopK() });
 	}
@@ -108,17 +117,20 @@ public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCre
 	}
 
 	@Override
-	public PreparedStatementCreator deleteByIdStatement() {
-		return this.statementFactory.newPreparedStatementCreator(
-				"DELETE FROM " + getFullyQualifiedTableName() + " WHERE id = ?", new Object[0]);
+	public Stream<SqlVectorStorePreparedStatement> deleteByIdStatement(List<String> idList, KeyHolder keyHolder) {
+		return Stream.<SqlVectorStorePreparedStatement>builder()
+			.add(new DefaultVectorStorePreparedStatement(
+					this.statementFactory.newPreparedStatementCreator(
+							"DELETE FROM " + getFullyQualifiedTableName() + " WHERE id = ?", new Object[0]),
+					deleteByIdSetter(idList, keyHolder)))
+			.build();
 	}
 
-	@Override
-	public BatchPreparedStatementSetter deleteByIdSetter(List<String> idList, KeyHolder keyHolder) {
+	private BatchPreparedStatementSetter deleteByIdSetter(List<String> idList, KeyHolder keyHolder) {
 		return new BatchPreparedStatementSetter() {
 
 			@Override
-			public void setValues(PreparedStatement ps, int i) throws SQLException {
+			public void setValues(java.sql.PreparedStatement ps, int i) throws SQLException {
 				var id = idList.get(i);
 				StatementCreatorUtils.setParameterValue(ps, 1, SqlTypeValue.TYPE_UNKNOWN, convertIdToPgType(id));
 			}
@@ -131,15 +143,19 @@ public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCre
 	}
 
 	@Override
-	public PreparedStatementCreator insertUpdateStatement() {
-		return this.statementFactory.newPreparedStatementCreator("INSERT INTO " + getFullyQualifiedTableName()
-				+ " (id, content, metadata, embedding) VALUES (?, ?, ?::jsonb, ?) " + "ON CONFLICT (id) DO "
-				+ "UPDATE SET content = ? , metadata = ?::jsonb , embedding = ? ", null);
-	}
-
-	@Override
-	public BatchPreparedStatementSetter insertUpdateSetter(List<Document> documents, KeyHolder keyHolder) {
-		return new InsertBatchPreparedStatementSetter(documents, keyHolder);
+	public Stream<SqlVectorStorePreparedStatement> insertUpdateStatement(List<Document> documents) {
+		List<float[]> embeddings = this.embeddingModel.embed(documents, EmbeddingOptions.builder().build(),
+				this.batchingStrategy);
+		List<SqlVectorStorePreparedStatement> batches = new ArrayList<>();
+		for (int i = 0; i < documents.size(); i += this.maxDocumentBatchSize) {
+			int offset = Math.min(this.maxDocumentBatchSize, documents.size() - i);
+			batches.add(new DefaultVectorStorePreparedStatement(
+					this.statementFactory.newPreparedStatementCreator("INSERT INTO " + getFullyQualifiedTableName()
+							+ " (id, content, metadata, embedding) VALUES (?, ?, ?::jsonb, ?) " + "ON CONFLICT (id) DO "
+							+ "UPDATE SET content = ? , metadata = ?::jsonb , embedding = ? ", null),
+					new InsertBatchPreparedStatementSetter(documents, embeddings, i, offset)));
+		}
+		return batches.stream();
 	}
 
 	private Object convertIdToPgType(String id) {
@@ -160,27 +176,33 @@ public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCre
 		return this.schemaName + "." + this.vectorTableName;
 	}
 
-	private class InsertBatchPreparedStatementSetter implements BatchPreparedStatementSetter {
+	private class InsertBatchPreparedStatementSetter implements InterruptibleBatchPreparedStatementSetter {
 
 		private final List<Document> documents;
 
 		private final List<float[]> embeddings;
 
-		private final KeyHolder keyHolder;
+		private final int start;
 
-		InsertBatchPreparedStatementSetter(List<Document> documents, KeyHolder keyHolder) {
+		private final int offset;
+
+		InsertBatchPreparedStatementSetter(List<Document> documents, List<float[]> embeddings, int start, int offset) {
 			this.documents = documents;
-			this.embeddings = embeddingModel.embed(documents, EmbeddingOptions.builder().build(), batchingStrategy);
-			this.keyHolder = keyHolder;
+			this.embeddings = embeddings;
+			this.start = start;
+			this.offset = offset;
 		}
 
 		@Override
 		public void setValues(PreparedStatement ps, int i) throws SQLException {
-			var document = this.documents.get(this.keyHolder.getKeyList().size() * getBatchSize());
+			if (i >= this.offset) {
+				throw new IndexOutOfBoundsException(i);
+			}
+			var document = this.documents.get(this.start + i);
 			var id = convertIdToPgType(document.getId());
 			var content = document.getText();
 			var json = toJson(document.getMetadata());
-			var embedding = this.embeddings.get(this.documents.indexOf(document));
+			var embedding = this.embeddings.get(this.start + i);
 			var pGvector = new PGvector(embedding);
 
 			StatementCreatorUtils.setParameterValue(ps, 1, SqlTypeValue.TYPE_UNKNOWN, id);
@@ -194,11 +216,40 @@ public class PgVectorStoreStatementCreator implements SqlVectorStoreStatementCre
 
 		@Override
 		public int getBatchSize() {
-			return maxDocumentBatchSize;
+			return this.offset;
 		}
 
 		private String toJson(Map<String, Object> map) {
 			return jsonMapper.writeValueAsString(map);
+		}
+
+		@Override
+		public boolean isBatchExhausted(int i) {
+			return this.offset <= i;
+		}
+
+	}
+
+	private static class DefaultVectorStorePreparedStatement
+			implements org.springframework.ai.vectorstore.pgvector.SqlVectorStorePreparedStatement {
+
+		private final PreparedStatementCreator statement;
+
+		private final BatchPreparedStatementSetter setter;
+
+		DefaultVectorStorePreparedStatement(PreparedStatementCreator statement, BatchPreparedStatementSetter setter) {
+			this.statement = statement;
+			this.setter = setter;
+		}
+
+		@Override
+		public PreparedStatementCreator getCreator() {
+			return this.statement;
+		}
+
+		@Override
+		public BatchPreparedStatementSetter getSetter() {
+			return this.setter;
 		}
 
 	}

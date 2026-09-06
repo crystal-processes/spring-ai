@@ -16,36 +16,19 @@
 
 package org.springframework.ai.vectorstore.pgvector;
 
+import org.springframework.jdbc.core.BatchPreparedStatementSetter;
+import org.springframework.jdbc.core.PreparedStatementCreator;
+
 /**
- * Interface representing a distance type for pgvector operations.
+ * Statement provider interface for {@link SqlVectorStoreStatementCreator}
  *
  * @author Martin Grofcik
  * @since 2.0.2
  */
-public interface PgDistanceType {
+public interface SqlVectorStorePreparedStatement {
 
-	/**
-	 * Returns the name of the distance type.
-	 * @return the name
-	 */
-	String name();
+	PreparedStatementCreator getCreator();
 
-	/**
-	 * Returns the operator used in PostgreSQL queries.
-	 * @return the operator
-	 */
-	String operator();
-
-	/**
-	 * Returns the index type used for the vector index.
-	 * @return the index type
-	 */
-	String index();
-
-	/**
-	 * Returns the SQL template for similarity search queries.
-	 * @return the similarity search SQL template
-	 */
-	String similaritySearchSqlTemplate();
+	BatchPreparedStatementSetter getSetter();
 
 }

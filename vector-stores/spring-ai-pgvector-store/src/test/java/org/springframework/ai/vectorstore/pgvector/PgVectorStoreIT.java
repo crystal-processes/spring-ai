@@ -486,7 +486,7 @@ public class PgVectorStoreIT extends BaseVectorStoreTests {
 	public static class TestApplication {
 
 		@Value("${test.spring.ai.vectorstore.pgvector.distanceType}")
-		PgDistanceType distanceType;
+		PgVectorStore.PgDistanceType distanceType;
 
 		@Value("${test.spring.ai.vectorstore.pgvector.initializeSchema:true}")
 		boolean initializeSchema;
@@ -503,6 +503,7 @@ public class PgVectorStoreIT extends BaseVectorStoreTests {
 				.initializeSchema(this.initializeSchema)
 				.indexType(PgIndexType.HNSW)
 				.removeExistingVectorStoreTable(true)
+				.maxDocumentBatchSize(2)
 				.build();
 		}
 

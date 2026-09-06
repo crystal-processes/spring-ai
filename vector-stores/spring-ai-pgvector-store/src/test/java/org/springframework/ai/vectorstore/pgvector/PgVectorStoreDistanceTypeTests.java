@@ -44,10 +44,6 @@ import static org.mockito.Mockito.when;
  */
 class PgVectorStoreDistanceTypeTests {
 
-	private static final TestPgDistanceType CUSTOM_DISTANCE_TYPE = new TestPgDistanceType("CUSTOM", "<custom>",
-			"custom_ops",
-			"SELECT *, embedding CUSTOM ? AS distance FROM %s WHERE embedding CUSTOM ? < ? %s ORDER BY distance LIMIT ? ");
-
 	@Test
 	void shouldUseCosineDistanceByDefault() {
 		// Given
@@ -58,26 +54,9 @@ class PgVectorStoreDistanceTypeTests {
 		var vectorStore = PgVectorStore.builder(jdbcTemplate, embeddingModel).build();
 
 		// Then
-		assertThat(vectorStore.getDistanceType()).isEqualTo(PgVectorStore.COSINE_DISTANCE);
-		assertThat(vectorStore.getDistanceType().operator()).isEqualTo("<=>");
-		assertThat(vectorStore.getDistanceType().index()).isEqualTo("vector_cosine_ops");
-	}
-
-	@Test
-	void shouldUseCustomDistanceType() {
-		// Given
-		var jdbcTemplate = mock(JdbcTemplate.class);
-		var embeddingModel = mock(EmbeddingModel.class);
-
-		// When
-		var vectorStore = PgVectorStore.builder(jdbcTemplate, embeddingModel)
-			.distanceType(CUSTOM_DISTANCE_TYPE)
-			.build();
-
-		// Then
-		assertThat(vectorStore.getDistanceType()).isEqualTo(CUSTOM_DISTANCE_TYPE);
-		assertThat(vectorStore.getDistanceType().operator()).isEqualTo("<custom>");
-		assertThat(vectorStore.getDistanceType().index()).isEqualTo("custom_ops");
+		assertThat(vectorStore.getDistanceType()).isEqualTo(PgVectorStore.PgDistanceType.COSINE_DISTANCE);
+		assertThat(vectorStore.getDistanceType().operator).isEqualTo("<=>");
+		assertThat(vectorStore.getDistanceType().index).isEqualTo("vector_cosine_ops");
 	}
 
 	@Test
@@ -91,7 +70,7 @@ class PgVectorStoreDistanceTypeTests {
 			.thenReturn(List.of());
 
 		var vectorStore = PgVectorStore.builder(jdbcTemplate, embeddingModel)
-			.distanceType(PgVectorStore.COSINE_DISTANCE)
+			.distanceType(PgVectorStore.PgDistanceType.COSINE_DISTANCE)
 			.initializeSchema(false)
 			.build();
 
@@ -113,14 +92,6 @@ class PgVectorStoreDistanceTypeTests {
 		// Verify that the default cosine distance operator is used in the SQL
 		verify(connection, times(1)).prepareStatement(
 				"SELECT *, embedding <=> ? AS distance FROM public.vector_store WHERE embedding <=> ? < ?  ORDER BY distance LIMIT ? ");
-	}
-
-	/**
-	 * Test implementation of {@link PgDistanceType}.
-	 */
-	private record TestPgDistanceType(String name, String operator, String index,
-			String similaritySearchSqlTemplate) implements PgDistanceType {
-
 	}
 
 }

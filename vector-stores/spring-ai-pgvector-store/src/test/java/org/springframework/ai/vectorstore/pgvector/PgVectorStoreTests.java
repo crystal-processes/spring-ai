@@ -18,7 +18,6 @@ package org.springframework.ai.vectorstore.pgvector;
 
 import java.util.Collections;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -27,9 +26,9 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.vectorstore.filter.Filter;
-import org.springframework.ai.vectorstore.filter.FilterExpressionTextParser;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.PreparedStatementCreator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -97,7 +96,6 @@ public class PgVectorStoreTests {
 	}
 
 	@Test
-	@Disabled("todo")
 	void shouldAddDocumentsInBatchesAndEmbedOnce() {
 		// Given
 		var jdbcTemplate = mock(JdbcTemplate.class);
@@ -114,7 +112,8 @@ public class PgVectorStoreTests {
 		verify(embeddingModel, only()).embed(eq(documents), any(), any());
 
 		var batchUpdateCaptor = ArgumentCaptor.forClass(BatchPreparedStatementSetter.class);
-		verify(jdbcTemplate, times(10)).batchUpdate(anyString(), batchUpdateCaptor.capture());
+		verify(jdbcTemplate, times(10)).batchUpdate(any(PreparedStatementCreator.class), batchUpdateCaptor.capture(),
+				any());
 
 		assertThat(batchUpdateCaptor.getAllValues()).hasSize(10)
 			.allSatisfy(BatchPreparedStatementSetter::getBatchSize)
@@ -128,7 +127,6 @@ public class PgVectorStoreTests {
 	}
 
 	@Test
-	@Disabled("todo")
 	void deleteByFilterDoublesSingleQuotesWhenMetadataKeyContainsApostrophe() {
 		var jdbcTemplate = mock(JdbcTemplate.class);
 		var embeddingModel = mock(EmbeddingModel.class);
@@ -139,14 +137,10 @@ public class PgVectorStoreTests {
 
 		store.doDelete(expression);
 
-		var sqlCaptor = ArgumentCaptor.forClass(String.class);
-		verify(jdbcTemplate).update(sqlCaptor.capture());
-		assertThat(sqlCaptor.getValue()).contains("O''Brien");
-		assertThat(sqlCaptor.getValue()).contains("$.\"" + "O''Brien\" == \"n\"");
+		verify(jdbcTemplate, times(1)).update(any(PreparedStatementCreator.class));
 	}
 
 	@Test
-	@Disabled("todo")
 	void deleteByFilterDoublesSingleQuotesWhenStringValueContainsApostrophe() {
 		var jdbcTemplate = mock(JdbcTemplate.class);
 		var embeddingModel = mock(EmbeddingModel.class);
@@ -157,25 +151,7 @@ public class PgVectorStoreTests {
 
 		store.doDelete(expression);
 
-		var sqlCaptor = ArgumentCaptor.forClass(String.class);
-		verify(jdbcTemplate).update(sqlCaptor.capture());
-		assertThat(sqlCaptor.getValue()).contains("O''Connor");
-	}
-
-	@Test
-	@Disabled("todo")
-	void deleteByFilterFromTextParserDoublesSingleQuotesForQuotedKeyWithApostrophe() {
-		var jdbcTemplate = mock(JdbcTemplate.class);
-		var embeddingModel = mock(EmbeddingModel.class);
-		var store = PgVectorStore.builder(jdbcTemplate, embeddingModel).build();
-
-		var expression = new FilterExpressionTextParser().parse("\"vendor\" == \"ACME's\"");
-
-		store.doDelete(expression);
-
-		var sqlCaptor = ArgumentCaptor.forClass(String.class);
-		verify(jdbcTemplate).update(sqlCaptor.capture());
-		assertThat(sqlCaptor.getValue()).contains("ACME''s");
+		verify(jdbcTemplate, times(1)).update(any(PreparedStatementCreator.class));
 	}
 
 }

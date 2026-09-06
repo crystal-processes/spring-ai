@@ -159,7 +159,7 @@ public class PgVectorStoreAutoTruncationIT {
 	public static class TestApplication {
 
 		@Value("${test.spring.ai.vectorstore.pgvector.distanceType}")
-		PgDistanceType distanceType;
+		PgVectorStore.PgDistanceType distanceType;
 
 		@Value("${test.spring.ai.vectorstore.pgvector.initializeSchema:true}")
 		boolean initializeSchema;
